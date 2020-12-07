@@ -44,5 +44,4 @@ class EnableHarvesters implements ColonyStageTarget{
 
 }
 const map:Map<ColonyStageTargetID,ColonyStageTarget> = new Map([
-	[ColonyStageTargetID.ENABLE_HARVESTERS,{}]
 ]);

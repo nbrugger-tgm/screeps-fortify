@@ -1,4 +1,4 @@
-import { Colony } from "./areal/Colony";
+import { Colony } from "./areal/colony/Colony";
 import { GameUtils } from "./utils/GameUtils";
 
 
