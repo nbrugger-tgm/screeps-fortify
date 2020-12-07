@@ -1,3 +1,5 @@
+import { ColonyStageID } from "./ColonyStage";
+
 export class Colony {
 	private sources: RoomPosition[];
 	private readonly room: Room;
@@ -23,6 +25,6 @@ export class Colony {
 declare global {
 	interface RoomMemory {
 		colonialisized: boolean;
-		stage: ColonyStageID
+		stage: ColonyStageID;
 	}
 }
