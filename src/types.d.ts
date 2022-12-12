@@ -3,17 +3,8 @@
 // memory extension samples
 
 
-interface CreepMemory {
-	role: string;
-	room: string;
-	working: boolean;
-}
-
-
 // `global` extension samples
 declare namespace NodeJS {
 	interface Global {
-		log: any;
-		penis: any;
 	}
 }

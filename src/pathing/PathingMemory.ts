@@ -1,165 +1,220 @@
 import { MapUtils } from "../utils/MapUtils";
+import { SerializableRoomPosition, toRoomPosition, toSerializableRoomPosition } from "../utils/misc";
 
+const unpassableObjects: LookConstant[] = [
+	LOOK_STRUCTURES,
+	LOOK_CONSTRUCTION_SITES,
+	LOOK_RUINS
+];
+export type PathingMemory = {
+	targetFieldIndex?: [SerializableRoomPosition, { [key: number]: SerializableRoomPosition[] }][];
+	routeCache?: PathNode[][];
+	occupiedTargets?: [SerializableRoomPosition, boolean][];
+}
 
-export class PathingMemory {
-	private targetFieldIndex: Map<RoomPosition, Map<number, RoomPosition[]>> = new Map<RoomPosition, Map<number, RoomPosition[]>>();
+export class PathingBrain {
 	/**
-	 * Map<FROM,Map<TO,ARRAY<Steps>>>
+	 * Stores positions around an object that can be used to reach the object from a certain range
+	 * Map<target, Map<range, surroundingTiles>>
 	 * @private
 	 */
-	private routeCache: Map<RoomPosition, Map<RoomPosition, Array<PathNode>>> = new Map();
-	private occupiedTargets: Map<RoomPosition, boolean> = new Map();
+	private targetFieldIndex: Map<SerializableRoomPosition, { [key: number]: SerializableRoomPosition[] }>;
+	/**
+	 * Map<FROM,Map<TO,STEPS>>
+	 * @private
+	 */
+	private routeCache: PathNode[][];
+	private occupiedTargets: Map<SerializableRoomPosition, boolean>;
+	private save() {
+		this.memory.targetFieldIndex = Array.from(this.targetFieldIndex);
+		this.memory.routeCache = this.routeCache;
+		this.memory.occupiedTargets = Array.from(this.occupiedTargets);
+	}
+	constructor(private memory: PathingMemory) {
+		this.targetFieldIndex = new Map(memory.targetFieldIndex ?? []);
+		this.routeCache = memory.routeCache ?? [];
+		this.occupiedTargets = new Map(memory.occupiedTargets ?? []);
+		this.save();
+	}
 
-	private static calculateRoute(from: RoomPosition, to: RoomPosition): Array<PathNode> {
+	private static calculateRoute(from: RoomPosition, to: RoomPosition): PathNode[] | undefined {
 		let result = PathFinder.search(from, to);
 		if (result.incomplete) {
-			throw Error("No path to find");
+			return undefined;
 		}
 		let path = [];
 		let nodes = result.path;
 		let lastNode = from;
 		for (const node of nodes) {
 			if (lastNode != node) {
-				path.push(new PathNode(node, lastNode.getDirectionTo(node)));
+				path.push({
+					direction: lastNode.getDirectionTo(node),
+					targetTile: node,
+					from: lastNode
+				});
 			}
 			lastNode = node;
 		}
 		return path;
 	}
 
-	public index(object: Locateable, ...radius: Array<number>): void {
-		if (radius.length === 0)
-			radius = [1];
-
-		let fields: Map<number, Array<RoomPosition>> = new Map();
-		for (const r of radius) {
-			fields.set(r, MapUtils.getSuroundingTiles(object.pos, r));
+	/**
+	 * Uses caching and special logic to find a path to a target
+	 * @return undefined if the target is not reachable or occupied
+	 */
+	public getRoute(from: RoomPosition, to: RoomPosition, radius = 0): PathNode[] | undefined {
+		let toPos = toRoomPosition(to);
+		let fromPos = toRoomPosition(from);
+		while (radius > 0) {
+			let destinations = this.getDesinations(toPos, radius).filter(p => this.isFree(p));
+			if (destinations.length > 0) {
+				toPos = toRoomPosition(this.getDesinations(toPos, radius)[0]);
+				break;
+			}
+			radius--;
 		}
-		this.targetFieldIndex.set(object.pos, fields);
-	}
 
-	public occupie(pos: RoomPosition): void {
-		for (const entry of this.targetFieldIndex) {
-			let radio: Map<number, RoomPosition[]> = entry[1];
-			let key = entry[0];
-			for (let entry of radio) {
-				let arr: RoomPosition[] = entry[1];
-				let index = arr.indexOf(pos);
-				if (index != -1) {
-					arr = arr.splice(index, 1);
-					radio.set(entry[0], arr);
-					break;
+		if (!this.isFree(toPos)) {
+			return undefined;
+		}
+
+		//find (sub)path in cache
+		for (let route of this.routeCache) {
+			let containsFrom = false;
+			for (let i = 0; i < route.length; i++) {
+				let node = route[i];
+				if (_.isEqual(node.from,fromPos)) {
+					containsFrom = true;
+					route = route.slice(i);
 				}
 			}
-			this.targetFieldIndex.set(key, radio);
-		}
-		for (const [from, toMap] of this.routeCache) {
-			for (const [to, route] of toMap) {
-				if (route.map((e) => e.targetTile).includes(pos)) {
-					toMap.delete(to);
+			if (!containsFrom) {
+				continue;
+			}
+			for (let i = 0; i < route.length; i++) {
+				let node = route[i];
+				if (_.isEqual(node.targetTile,toPos)) {
+					return route.slice(0, i + 1);
 				}
 			}
 		}
+
+		//no suitable subroute found - calculate new route
+		let calculatedRoute = PathingBrain.calculateRoute(fromPos, toPos);
+		this.routeCache.push(calculatedRoute ?? []);
+		this.save();
+		return calculatedRoute;
 	}
 
-	public getDesinations(target: RoomPosition, radius: number): RoomPosition[] {
+	//position cant be used as path endpoint
+	public lock(pos: SerializableRoomPosition) {
+		this.occupiedTargets.set(pos, true);
+		this.save()
+	}
+
+	public unlock(pos: SerializableRoomPosition) {
+		this.occupiedTargets.set(pos, false);
+		this.save();
+	}
+
+	public moveTowards(me: Creep, to: RoomPosition, radius = 1): MoveResult {
+		let memory = me.memory.pathing;
+		if (!memory) memory = me.memory.pathing = {};
+		if (me.pos.isEqualTo(to)) {
+			console.log("moveTowards: already at target", me.name, to,me.pos);
+			this.unlock(to);
+			memory.route = undefined;
+			return MoveResult.REACHED_TARGET;
+		}
+		let route = memory.route;
+		if (!route) {
+			route = this.getRoute(me.pos, to, radius);
+			memory.route = route;
+		}
+		if (!route) {
+			return MoveResult.UNREACHABLE;
+		}
+		if(me.name == "Harvester85.48883396016862"){
+			for (const pathNode of route) {
+				Game.rooms[pathNode.from.roomName].visual.rect(toRoomPosition(pathNode.from),1,1)
+			}
+		}
+		this.lock(to);
+
+		let myNode = false;
+		for (const pathNode of route) {
+			if(me.name == "Harvester85.48883396016862"){
+				console.log("compare to",JSON.stringify(pathNode.from),"and",JSON.stringify(toSerializableRoomPosition(me.pos)));
+			}
+			if (equalPositions(pathNode.from, me.pos)) {
+				myNode = true;
+				continue;
+			}
+			if (myNode) {
+				me.move(pathNode.direction);
+				break;
+			}
+		}
+		if(!myNode) {
+			if(me.name == "Harvester85.48883396016862")
+				console.log("Did not find myself ",me.name," on any node", JSON.stringify(toSerializableRoomPosition(me.pos)));
+			this.unlock(to)
+			memory.route = undefined;
+		}
+		return MoveResult.MOVED;
+	}
+
+	private getDesinations(target: SerializableRoomPosition, radius: number): SerializableRoomPosition[] {
 		let objMap = this.targetFieldIndex.get(target);
 		if (objMap !== undefined) {
-			let arr = objMap.get(radius);
+			let arr = objMap[radius];
 			if (arr === undefined) {
 				arr = MapUtils.getSuroundingTiles(target, radius);
-				objMap.set(radius, arr);
+				objMap[radius] = arr;
 			}
 			return arr;
 		} else {
-			let arr = MapUtils.getSuroundingTiles(target, radius);
-			let map = new Map<number, RoomPosition[]>();
-			map.set(radius, arr);
+			let surroundingFreeTiles = MapUtils.getSuroundingTiles(target, radius).filter(
+				e => Game.rooms[e.roomName].lookAt(toRoomPosition(e)).filter(struc => unpassableObjects.includes(struc.type) || struc.terrain == "wall").length == 0
+			);
+			let map:{[key: number]: SerializableRoomPosition[]} = {};
+			map[radius] = surroundingFreeTiles;
 			this.targetFieldIndex.set(target, map);
-			return arr;
+			this.save();
+			return surroundingFreeTiles;
 		}
 	}
 
-	public getRoute(from: RoomPosition, to: RoomPosition, radius = 0): Array<PathNode> {
-		if (radius > 0) {
-			to = this.getDesinations(to, radius)[0];
-		}
-		if (this.routeCache.has(from)) {
-			let fromFilteredRoutes = this.routeCache.get(from);
-			// @ts-ignore
-			if (fromFilteredRoutes.has(to)) {
-				// @ts-ignore
-				return this.readCache(from, to);
-			} else {
-				let route: Array<PathNode> = PathingMemory.calculateRoute(from, to);
-				// @ts-ignore
-				fromFilteredRoutes.set(to, route);
-				return route;
-			}
-		} else {
-			let route: Array<PathNode> = PathingMemory.calculateRoute(from, to);
-			let fromFilteredRoutes = new Map<RoomPosition, Array<PathNode>>();
-			fromFilteredRoutes.set(to, route);
-			this.routeCache.set(from, fromFilteredRoutes);
-			return route;
-		}
+	private isFree(pos: SerializableRoomPosition): boolean {
+		return this.occupiedTargets.get(pos)??true;
 	}
-
-	public lock(pos: RoomPosition) {
-		this.occupiedTargets.set(pos, true);
-	}
-
-	public isFree(pos: RoomPosition): boolean {
-		return !this.occupiedTargets.get(pos);
-	}
-
-	public unlock(pos: RoomPosition) {
-		this.occupiedTargets.set(pos, false);
-	}
-
-	private containsRoute(from: RoomPosition, to: RoomPosition) {
-		// @ts-ignore
-		return this.routeCache.has(from) && this.routeCache.get(from).has(to);
-	}
-
-	private readCache(from: RoomPosition, to: RoomPosition): Array<[number, RoomPosition]> {
-		// @ts-ignore
-		return this.routeCache.get(from).get(to);
-	}
-
+}
+function equalPositions(a: SerializableRoomPosition, b: SerializableRoomPosition): boolean {
+	return a.x == b.x && a.y == b.y && a.roomName == b.roomName;
+}
+type CreepPathingMemory = {
+	route?: PathNode[];
 }
 
-export interface Locateable {
-	pos: RoomPosition;
-}
-
-export class Route implements IRoute {
-	public from: RoomPosition;
-	public to: RoomPosition;
-
-	constructor(from: RoomPosition, to: RoomPosition) {
-		this.from = from;
-		this.to = to;
+declare global {
+	interface CreepMemory {
+		pathing?: CreepPathingMemory;
 	}
 }
 
-export interface IRoute {
-	from: RoomPosition;
-	to: RoomPosition;
+export enum MoveResult {
+	REACHED_TARGET,
+	MOVED,
+	UNREACHABLE
 }
 
-export interface IPathNode {
+export type Route = {
+	from: SerializableRoomPosition;
+	to: SerializableRoomPosition;
+}
+
+export type PathNode = {
 	direction: DirectionConstant;
-	targetTile: RoomPosition;
-}
-
-export class PathNode implements IPathNode {
-	direction: DirectionConstant;
-	targetTile: RoomPosition;
-
-	constructor(node: RoomPosition, directionTo: DirectionConstant) {
-		this.direction = directionTo;
-		this.targetTile = node;
-	}
-
+	targetTile: SerializableRoomPosition;
+	from: SerializableRoomPosition;
 }

@@ -1,4 +1,4 @@
-import { SourceMapConsumer } from "source-map";
+import {SourceMapConsumer} from "source-map";
 
 export class ErrorMapper {
 	// Cache previously mapped traces to improve performance
